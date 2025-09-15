@@ -26,11 +26,4 @@ if ! command -v hyperfine > /dev/null 2>&1 ; then
 	exit 1
 fi
 
-build/release/1blc measurements.txt > build/release/measurements_result.txt
-if cmp --silent -- measurements-result-expected.txt build/release/measurements_result.txt ; then
-	echo "OK"
-else
-	echo "FAIL"
-	exit 1
-fi
-
+hyperfine -w 3 'build/release/1blc measurements.txt > /dev/null'

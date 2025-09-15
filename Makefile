@@ -4,15 +4,15 @@ RM := rm -f
 WARN := -Wall -Wextra -Wpedantic
 BUILD ?= debug
 CFLAGS := -MMD -MP
-SANITIZER := -fsanitize=address
-# SANITIZER := 
+# SANITIZER := -fsanitize=address
+SANITIZER := 
 
 ifeq ($(BUILD),debug)
 	CFLAGS := $(CFLAGS) -g -O0 $(SANITIZER) $(WARN)
 	LDFLAGS := $(SANITIZER)
 	BUILD_DIR := build/debug
 else ifeq ($(BUILD),release) 
-	CFLAGS := $(CFLAGS) -O3 -march=native -DNDEBUG $(WARN)
+	CFLAGS := $(CFLAGS) -Ofast -march=native -DNDEBUG $(WARN)
 	LDFLAGS := -s
 	BUILD_DIR := build/release
 else
@@ -45,6 +45,9 @@ clean:
 
 test: release
 	./run-test.sh
+
+bench: release
+	./run-bench.sh
 
 compile_commands:
 	bear -- $(MAKE)
