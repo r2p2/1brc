@@ -353,12 +353,8 @@ struct worker
 	thrd_t       thrd;
 	atomic_int   running;
 	int number;
-	FILE* file;
+	char* buffer;
 	size_t file_chunk_size;
-	char* write_ahead_buffer;
-	size_t write_ahead_buffer_size;
-	size_t write_ahead_buffer_cap;
-	atomic_int write_ahead_state; // 0 init; 1 request; 2 complete
 	struct hashmap_weather_data weather_data;
 };
 int worker_run(void*);
@@ -367,20 +363,14 @@ worker_init(
 		struct worker* worker,
 		size_t buckets,
 		int number,
-		char const* path,
-		size_t file_chunk_size,
-		size_t buffer_size
+		char* buffer,
+		size_t file_chunk_size
 	)
 {
 	worker->running = 1;
 	worker->number = number;
 	worker->file_chunk_size = file_chunk_size;
-	worker->write_ahead_buffer = calloc(buffer_size, sizeof(char));
-	worker->write_ahead_buffer_size = 0;
-	worker->write_ahead_buffer_cap = buffer_size;
-	worker->write_ahead_state = 0;
-	worker->file = fopen(path, "r");
-	fseek(worker->file, worker->number * worker->file_chunk_size, SEEK_SET);
+	worker->buffer = buffer;
 	hashmap_weather_data_init(&worker->weather_data, buckets);
 
 	thrd_create(&worker->thrd, worker_run, worker);
@@ -388,7 +378,6 @@ worker_init(
 void
 worker_deinit(struct worker* worker)
 {
-	fclose(worker->file);
 	int result = 0;
 	thrd_join(worker->thrd, &result);
 	hashmap_weather_data_deinit(&worker->weather_data);
@@ -398,87 +387,74 @@ worker_run(void* data)
 {
 	struct worker* worker = data;
 
-	struct buffer buffer;
-	buffer_init(&buffer, worker->write_ahead_buffer_cap * 2);
+	// struct buffer buffer;
+	// buffer_init(&buffer, worker->write_ahead_buffer_cap * 2);
+	//
+	// char* read_buffer = calloc(worker->write_ahead_buffer_cap, sizeof(char));
+	// size_t bytes_read = fread(read_buffer, sizeof(char), worker->write_ahead_buffer_cap, worker->file);
+	// buffer_push_back(&buffer, read_buffer, bytes_read);
+	// // free(read_buffer);
 
-	char* read_buffer = calloc(worker->write_ahead_buffer_cap, sizeof(char));
-	size_t bytes_read = fread(read_buffer, sizeof(char), worker->write_ahead_buffer_cap, worker->file);
-	buffer_push_back(&buffer, read_buffer, bytes_read);
-	// free(read_buffer);
 
-
-	char* it = strchr(buffer.data, '\n')+1;
+	char* it = strchr(worker->buffer, '\n')+1;
 
 	size_t bytes_processed = 0;
-	while(1) 
+
+	while(1)
 	{
-		// printf("%d (%f)\n", worker->number, (double)bytes_processed/worker->file_chunk_size*100);
-		// buffer_push_back(&buffer, worker->write_ahead_buffer, bytes_read);
-		worker->write_ahead_state = 1;
-		// printf("worker: %d preload request\n", worker->number);
-		// printf("beginning\n");
-		// str_pp(buffer.data, 0, 30);
-
-		while(1)
-		{
-			if ((size_t)((it - buffer.data)) >= buffer.size)
-			{
-				break;
-			}
-			// char* end_of_line = strchr(it, '\n');
-			char* end_of_line = memchr(it, '\n', buffer.size - (it - buffer.data));
-			if (end_of_line == 0) {
-				// printf("end %ld\n", it - buffer.data);
-				// str_pp(buffer.data, it-buffer.data-10, buffer.size - (it-buffer.data)+10);
-				break;
-			}
-			size_t line_len = end_of_line - it + 1;
-
-			char* delim_ptr = strchr(it, ';');
-			// char* delim_ptr = line + len - 4; //strchr(worker->buffer_it, ';');
-			// while (*delim_ptr != ';') {
-			// 	delim_ptr -= 1;
-			// }
-		
-			ssize_t delim_idx = delim_ptr - it;
-
-			if (delim_ptr == 0) {
-				// TODO issue ?
-				// printf("foo\n");
-				break; 
-			}
-
-			char city[101];
-			strncpy(city, it, delim_idx); // TODO: ensure this is lower than 101
-			city[delim_idx] = 0;
-
-			double temp = my_atof(delim_ptr+1, end_of_line-2);
-
-			struct weather_data* weather_data = hashmap_weather_data_find_or_add(&worker->weather_data, city);
-			// TODO: There might be an issue with the initial state
-			weather_data->min = weather_data->min > temp ? temp : weather_data->min;
-			weather_data->max = weather_data->max < temp ? temp : weather_data->max;
-			weather_data->sum += temp;
-			weather_data->n += 1;
-
-			it += line_len;
-			// buffer_drop_front(&buffer, line_len);
-			bytes_processed += line_len;
-			if (bytes_processed > worker->file_chunk_size) {
-				goto done;
-			}
-		}
-		buffer_drop_front(&buffer, it - buffer.data);
-		while (worker->write_ahead_state != 2) ;
-		if (worker->write_ahead_buffer_size == 0) {
+		// if ((size_t)((it - buffer.data)) >= buffer.size)
+		// {
+		// 	break;
+		// }
+		char* end_of_line = strchr(it, '\n');
+		// char* end_of_line = memchr(it, '\n', buffer.size - (it - buffer.data));
+		if (end_of_line == 0) {
+			// printf("end %ld\n", it - buffer.data);
+			// str_pp(buffer.data, it-buffer.data-10, buffer.size - (it-buffer.data)+10);
 			break;
 		}
-		buffer_push_back(&buffer, worker->write_ahead_buffer, worker->write_ahead_buffer_size);
-		it = buffer.data;
+		size_t line_len = end_of_line - it + 1;
+
+		char* delim_ptr = strchr(it, ';');
+		// char* delim_ptr = line + len - 4; //strchr(worker->buffer_it, ';');
+		// while (*delim_ptr != ';') {
+		// 	delim_ptr -= 1;
+		// }
+	
+		ssize_t delim_idx = delim_ptr - it;
+
+		if (delim_ptr == 0) {
+			// TODO issue ?
+			// printf("foo\n");
+			break; 
+		}
+
+		// printf("%zu, %zd\n", line_len, delim_idx);
+
+		char city[101];
+		strncpy(city, it, delim_idx); // TODO: ensure this is lower than 101
+		city[delim_idx] = 0;
+
+		double temp = my_atof(delim_ptr+1, end_of_line-2);
+
+		// str_pp(it, 0, 10);
+		// printf(">%s:%f\n", city, temp);
+
+		struct weather_data* weather_data = hashmap_weather_data_find_or_add(&worker->weather_data, city);
+		// TODO: There might be an issue with the initial state
+		weather_data->min = weather_data->min > temp ? temp : weather_data->min;
+		weather_data->max = weather_data->max < temp ? temp : weather_data->max;
+		weather_data->sum += temp;
+		weather_data->n += 1;
+
+		it += line_len;
+		// buffer_drop_front(&buffer, line_len);
+		bytes_processed += line_len;
+		if (bytes_processed > worker->file_chunk_size) {
+			goto done;
+		}
 	}
 done:
-
-	worker->running = 0;
 	// printf("worker: %d end\n", worker->number);
 
 	// mtx_lock(&mtx);
@@ -559,7 +535,11 @@ main(int argc, char** argv)
 	fseek(fd, 0L, SEEK_END);
 	long file_size = ftell(fd);
 	long chunk_size = file_size / NUMWORKER;
-	fclose(fd);
+	// fclose(fd);
+
+	char* buffer = 
+			// mmap(0, file_size, PROT_READ, MAP_SHARED, fileno(fd), 0);
+			mmap(0, file_size, PROT_READ, MAP_PRIVATE , fileno(fd), 0);
 
 	// printf("file size:%ld %ld\n", file_size, chunk_size);
 	
@@ -574,32 +554,39 @@ main(int argc, char** argv)
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 500 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 200 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 100 MB);
-		worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 90 MB);
+		worker_init(&workers[i], BUCKETS, i, buffer + i * chunk_size, chunk_size);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 80 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 50 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 1 MB);
 	} 
 
-
-	int workers_running = 0;
-	do
+	for (size_t i = 0; i < number_workers; ++i)
 	{
-		workers_running = 0;
-		for (size_t i = 0; i < NUMWORKER; ++i)
-		{
-			struct worker* worker = &workers[i];
-			if (worker->running == 0) {
-				continue;
-			}
-			workers_running += 1;
-			if (workers[i].write_ahead_state == 1) {
-				// printf("worker: %zu preload start %zu\n", i, worker->write_ahead_buffer_cap);
-				worker->write_ahead_buffer_size = fread(worker->write_ahead_buffer, sizeof(char), worker->write_ahead_buffer_cap, worker->file);
-				// printf("worker: %zu preload complete\n", i);
-				worker->write_ahead_state = 2;
-			}
-		} 
-	} while(workers_running);
+		struct worker* worker = &workers[i];
+		int result = 0;
+		thrd_join(worker->thrd, &result);
+	} 
+
+
+	// int workers_running = 0;
+	// do
+	// {
+	// 	workers_running = 0;
+	// 	for (size_t i = 0; i < NUMWORKER; ++i)
+	// 	{
+	// 		struct worker* worker = &workers[i];
+	// 		if (worker->running == 0) {
+	// 			continue;
+	// 		}
+	// 		workers_running += 1;
+	// 		if (workers[i].write_ahead_state == 1) {
+	// 			// printf("worker: %zu preload start %zu\n", i, worker->write_ahead_buffer_cap);
+	// 			worker->write_ahead_buffer_size = fread(worker->write_ahead_buffer, sizeof(char), worker->write_ahead_buffer_cap, worker->file);
+	// 			// printf("worker: %zu preload complete\n", i);
+	// 			worker->write_ahead_state = 2;
+	// 		}
+	// 	} 
+	// } while(workers_running);
 
 
 	// int workers_left = NUMWORKER;
