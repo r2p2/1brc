@@ -14,15 +14,14 @@
 #define KB 1024
 #define MB * 1025 * KB
 // #define NUMWORKER 11
-#define NUMWORKER 10
+#define NUMWORKER 14
 // #define NUMWORKER 1
 #define BUCKETS 1000
+// #define CHUNKSIZE 100 MB
+// #define CHUNKSIZE 50 MB
+#define CHUNKSIZE 100 MB
+atomic_ullong offset;
 
-#define valid_digit(c) ((c) >= '0' && (c) <= '9')
-
-// TODO remove me
-mtx_t mtx;
-cnd_t cnd;
 
 void
 str_pp(char* s, size_t offset, size_t n)
@@ -261,10 +260,17 @@ hashmap_weather_data_deinit(struct hashmap_weather_data* hm)
 	hm->data = 0;
 	hm->buckets = 0;
 }
+
+#include <stdint.h>
+uint32_t reduce(uint32_t x, uint32_t N) {
+  return ((uint64_t) x * (uint64_t) N) >> 32 ;
+}
+
 struct weather_data*
 hashmap_weather_data_find_or_add(struct hashmap_weather_data* hm, char* city)
 {
-	ssize_t idx = hash(city) % hm->buckets;
+	// ssize_t idx = hash(city) % hm->buckets;
+	ssize_t idx = reduce(hash(city), hm->buckets);
 	struct weather_data* wd = hm->data[idx]; 
 
 	while (wd)
@@ -287,7 +293,8 @@ hashmap_weather_data_find_or_add(struct hashmap_weather_data* hm, char* city)
 struct weather_data*
 hashmap_weather_data_find(struct hashmap_weather_data* hm, char* city)
 {
-	ssize_t idx = hash(city) % hm->buckets;
+	// ssize_t idx = hash(city) % hm->buckets;
+	ssize_t idx = reduce(hash(city), hm->buckets);
 	struct weather_data* wd = hm->data[idx]; 
 
 	while (wd)
@@ -354,7 +361,7 @@ struct worker
 	atomic_int   running;
 	int number;
 	char* buffer;
-	size_t file_chunk_size;
+	size_t buffer_size;
 	struct hashmap_weather_data weather_data;
 };
 int worker_run(void*);
@@ -364,13 +371,13 @@ worker_init(
 		size_t buckets,
 		int number,
 		char* buffer,
-		size_t file_chunk_size
+		size_t buffer_size
 	)
 {
 	worker->running = 1;
 	worker->number = number;
-	worker->file_chunk_size = file_chunk_size;
 	worker->buffer = buffer;
+	worker->buffer_size = buffer_size;
 	hashmap_weather_data_init(&worker->weather_data, buckets);
 
 	thrd_create(&worker->thrd, worker_run, worker);
@@ -395,71 +402,82 @@ worker_run(void* data)
 	// buffer_push_back(&buffer, read_buffer, bytes_read);
 	// // free(read_buffer);
 
-
-	char* it = strchr(worker->buffer, '\n')+1;
-
-	size_t bytes_processed = 0;
-
-	while(1)
+	while (1)
 	{
-		// if ((size_t)((it - buffer.data)) >= buffer.size)
-		// {
-		// 	break;
-		// }
-		char* end_of_line = strchr(it, '\n');
-		// char* end_of_line = memchr(it, '\n', buffer.size - (it - buffer.data));
-		if (end_of_line == 0) {
-			// printf("end %ld\n", it - buffer.data);
-			// str_pp(buffer.data, it-buffer.data-10, buffer.size - (it-buffer.data)+10);
-			break;
-		}
-		size_t line_len = end_of_line - it + 1;
-
-		char* delim_ptr = strchr(it, ';');
-		// char* delim_ptr = line + len - 4; //strchr(worker->buffer_it, ';');
-		// while (*delim_ptr != ';') {
-		// 	delim_ptr -= 1;
-		// }
-	
-		ssize_t delim_idx = delim_ptr - it;
-
-		if (delim_ptr == 0) {
-			// TODO issue ?
-			// printf("foo\n");
-			break; 
-		}
-
-		// printf("%zu, %zd\n", line_len, delim_idx);
-
-		char city[101];
-		strncpy(city, it, delim_idx); // TODO: ensure this is lower than 101
-		city[delim_idx] = 0;
-
-		double temp = my_atof(delim_ptr+1, end_of_line-2);
-
-		// str_pp(it, 0, 10);
-		// printf(">%s:%f\n", city, temp);
-
-		struct weather_data* weather_data = hashmap_weather_data_find_or_add(&worker->weather_data, city);
-		// TODO: There might be an issue with the initial state
-		weather_data->min = weather_data->min > temp ? temp : weather_data->min;
-		weather_data->max = weather_data->max < temp ? temp : weather_data->max;
-		weather_data->sum += temp;
-		weather_data->n += 1;
-
-		it += line_len;
-		// buffer_drop_front(&buffer, line_len);
-		bytes_processed += line_len;
-		if (bytes_processed > worker->file_chunk_size) {
+		size_t chunk_offset = (offset += CHUNKSIZE) - CHUNKSIZE;
+		if (chunk_offset >= worker->buffer_size)
+		{
 			goto done;
 		}
+
+		char* it = memchr(worker->buffer + chunk_offset, '\n', worker->buffer_size - chunk_offset)+1;
+		if (it == 0)
+		{
+			goto done;
+		}
+		// printf("worker:%d %f\n", worker->number, (double)chunk_offset/worker->buffer_size*100);
+
+		size_t bytes_processed = 0;
+
+		while(1)
+		{
+			// if ((size_t)((it - buffer.data)) >= buffer.size)
+			// {
+			// 	break;
+			// }
+			char* end_of_line = strchr(it, '\n');
+			// char* end_of_line = memchr(it, '\n', buffer.size - (it - buffer.data));
+			if (end_of_line == 0) {
+				// printf("end %ld\n", it - buffer.data);
+				// str_pp(buffer.data, it-buffer.data-10, buffer.size - (it-buffer.data)+10);
+				break;
+			}
+			size_t line_len = end_of_line - it + 1;
+
+			char* delim_ptr = strchr(it, ';');
+			// char* delim_ptr = line + len - 4; //strchr(worker->buffer_it, ';');
+			// while (*delim_ptr != ';') {
+			// 	delim_ptr -= 1;
+			// }
+		
+			ssize_t delim_idx = delim_ptr - it;
+
+			if (delim_ptr == 0) {
+				// TODO issue ?
+				// printf("foo\n");
+				break; 
+			}
+
+			// printf("%zu, %zd\n", line_len, delim_idx);
+
+			char city[101];
+			strncpy(city, it, delim_idx); // TODO: ensure this is lower than 101
+			city[delim_idx] = 0;
+
+			double temp = my_atof(delim_ptr+1, end_of_line-2);
+
+			// str_pp(it, 0, 10);
+			// printf(">%s:%f\n", city, temp);
+
+			struct weather_data* weather_data = hashmap_weather_data_find_or_add(&worker->weather_data, city);
+			// TODO: There might be an issue with the initial state
+			weather_data->min = weather_data->min > temp ? temp : weather_data->min;
+			weather_data->max = weather_data->max < temp ? temp : weather_data->max;
+			weather_data->sum += temp;
+			weather_data->n += 1;
+
+			it += line_len;
+			// buffer_drop_front(&buffer, line_len);
+			bytes_processed += line_len;
+			if (bytes_processed > CHUNKSIZE) {
+				// goto done;
+				break;
+			}
+		}
+		// printf("worker: %d end chunk %zu\n", worker->number, chunk_offset);
 	}
 done:
 	// printf("worker: %d end\n", worker->number);
-
-	// mtx_lock(&mtx);
-	// cnd_signal(&cnd);
-	// mtx_unlock(&mtx);
 
 	return 0;
 }
@@ -510,9 +528,6 @@ void print(struct worker* worker)
 int
 main(int argc, char** argv)
 {
-	mtx_init(&mtx, mtx_plain);
-	cnd_init(&cnd);
-
 	if (argc < 2)
 	{
 		// TODO: Print usage
@@ -534,7 +549,7 @@ main(int argc, char** argv)
 	FILE* fd = fopen(measurements_path, "r");
 	fseek(fd, 0L, SEEK_END);
 	long file_size = ftell(fd);
-	long chunk_size = file_size / NUMWORKER;
+	// long chunk_size = file_size / NUMWORKER;
 	// fclose(fd);
 
 	char* buffer = 
@@ -554,7 +569,7 @@ main(int argc, char** argv)
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 500 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 200 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 100 MB);
-		worker_init(&workers[i], BUCKETS, i, buffer + i * chunk_size, chunk_size);
+		worker_init(&workers[i], BUCKETS, i, buffer, file_size);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 80 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 50 MB);
 		// worker_init(&workers[i], BUCKETS, i, measurements_path, chunk_size, 1 MB);
@@ -592,9 +607,6 @@ main(int argc, char** argv)
 	// int workers_left = NUMWORKER;
 	// while (workers_left > 0)
 	// {
-	// 	mtx_lock(&mtx);
-	// 	cnd_wait(&cnd, &mtx);
-	// 	mtx_unlock(&mtx);
 	// 	--workers_left;
 	// }
 
